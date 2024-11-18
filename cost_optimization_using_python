@@ -1,0 +1,210 @@
+Creating an **AWS Cost Optimization Tool** using Boto3 to identify and clean up unused resources involves the following steps. Below is a step-by-step breakdown of the project:
+
+---
+
+### **Step 1: Define the Objective**
+The tool aims to:
+1. **Identify unused AWS resources** such as:
+   - Unattached Elastic Block Store (EBS) volumes.
+   - Idle Elastic IPs.
+   - Underutilized EC2 instances.
+   - Unused RDS instances.
+   - Orphaned Load Balancers.
+2. **Automate Cleanup**: Delete or stop resources that are unused or idle.
+3. **Provide Reporting**: Send a summary report of actions taken and cost savings.
+
+---
+
+### **Step 2: Set Up Your Environment**
+1. **Prerequisites**:
+   - Install Python (v3.x recommended).
+   - Install and configure AWS CLI with credentials (`aws configure`).
+   - Install Boto3:  
+     ```bash
+     pip install boto3
+     ```
+
+2. **IAM Permissions**:
+   - Ensure the script runs with sufficient permissions to list, describe, and delete AWS resources:
+     - EC2: `DescribeInstances`, `StopInstances`, `DescribeVolumes`, `DeleteVolume`.
+     - Elastic IPs: `DescribeAddresses`, `ReleaseAddress`.
+     - RDS: `DescribeDBInstances`, `DeleteDBInstance`.
+     - ELB: `DescribeLoadBalancers`, `DeleteLoadBalancer`.
+
+---
+
+### **Step 3: Identify Unused Resources**
+Each resource type requires specific checks to determine if it is unused. 
+
+#### A. **Unattached EBS Volumes**  
+Unattached EBS volumes incur storage costs even when not used. Use Boto3 to find volumes with the `State` set to **`available`**.
+   ```python
+   def find_unattached_volumes(ec2_client):
+       volumes = ec2_client.describe_volumes(Filters=[{'Name': 'status', 'Values': ['available']}])
+       return [vol['VolumeId'] for vol in volumes['Volumes']]
+   ```
+
+#### B. **Idle Elastic IPs**  
+Elastic IPs not associated with an instance incur charges. Identify these using `describe_addresses`:
+   ```python
+   def find_idle_elastic_ips(ec2_client):
+       addresses = ec2_client.describe_addresses()
+       return [addr['PublicIp'] for addr in addresses['Addresses'] if 'InstanceId' not in addr]
+   ```
+
+#### C. **Underutilized EC2 Instances**  
+Use **CloudWatch metrics** to analyze CPU usage for running instances. Instances with consistently low utilization (e.g., below 10% over the past week) can be stopped:
+   ```python
+   def find_underutilized_instances(ec2_client, cloudwatch_client):
+       instances = ec2_client.describe_instances(Filters=[{'Name': 'instance-state-name', 'Values': ['running']}])
+       underutilized = []
+       for res in instances['Reservations']:
+           for inst in res['Instances']:
+               metrics = cloudwatch_client.get_metric_statistics(
+                   Namespace='AWS/EC2',
+                   MetricName='CPUUtilization',
+                   Dimensions=[{'Name': 'InstanceId', 'Value': inst['InstanceId']}],
+                   StartTime=datetime.utcnow() - timedelta(days=7),
+                   EndTime=datetime.utcnow(),
+                   Period=86400,
+                   Statistics=['Average']
+               )
+               if metrics['Datapoints'] and metrics['Datapoints'][0]['Average'] < 10:
+                   underutilized.append(inst['InstanceId'])
+       return underutilized
+   ```
+
+#### D. **Unused RDS Instances**  
+List all RDS instances and mark those that are not being accessed or are in a stopped state:
+   ```python
+   def find_unused_rds_instances(rds_client):
+       dbs = rds_client.describe_db_instances()
+       return [db['DBInstanceIdentifier'] for db in dbs['DBInstances'] if db['DBInstanceStatus'] == 'stopped']
+   ```
+
+#### E. **Orphaned Load Balancers**  
+Identify load balancers with no active backend instances:
+   ```python
+   def find_orphaned_load_balancers(elb_client):
+       lbs = elb_client.describe_load_balancers()
+       orphaned = []
+       for lb in lbs['LoadBalancerDescriptions']:
+           if not lb['Instances']:  # No instances attached
+               orphaned.append(lb['LoadBalancerName'])
+       return orphaned
+   ```
+
+---
+
+### **Step 4: Automate Cleanup**
+Define cleanup functions to delete or stop identified resources.
+
+#### A. Delete Unattached EBS Volumes
+```python
+def delete_unattached_volumes(ec2_client, volume_ids):
+    for vol_id in volume_ids:
+        ec2_client.delete_volume(VolumeId=vol_id)
+        print(f"Deleted volume: {vol_id}")
+```
+
+#### B. Release Idle Elastic IPs
+```python
+def release_idle_elastic_ips(ec2_client, ips):
+    for ip in ips:
+        ec2_client.release_address(PublicIp=ip)
+        print(f"Released Elastic IP: {ip}")
+```
+
+#### C. Stop Underutilized EC2 Instances
+```python
+def stop_underutilized_instances(ec2_client, instance_ids):
+    for instance_id in instance_ids:
+        ec2_client.stop_instances(InstanceIds=[instance_id])
+        print(f"Stopped instance: {instance_id}")
+```
+
+#### D. Delete Unused RDS Instances
+```python
+def delete_unused_rds_instances(rds_client, db_instance_ids):
+    for db_id in db_instance_ids:
+        rds_client.delete_db_instance(DBInstanceIdentifier=db_id, SkipFinalSnapshot=True)
+        print(f"Deleted RDS instance: {db_id}")
+```
+
+#### E. Delete Orphaned Load Balancers
+```python
+def delete_orphaned_load_balancers(elb_client, lb_names):
+    for lb_name in lb_names:
+        elb_client.delete_load_balancer(LoadBalancerName=lb_name)
+        print(f"Deleted Load Balancer: {lb_name}")
+```
+
+---
+
+### **Step 5: Generate a Summary Report**
+Create a function to log and email a report of actions taken:
+```python
+def generate_report(actions):
+    report = "AWS Cost Optimization Report:\n\n"
+    for action, resources in actions.items():
+        report += f"{action}:\n"
+        for res in resources:
+            report += f"  - {res}\n"
+    print(report)
+    # Optionally, send the report via email using SES or another service.
+```
+
+---
+
+### **Step 6: Main Script**
+Combine the functions into a cohesive workflow:
+```python
+import boto3
+from datetime import datetime, timedelta
+
+def main():
+    ec2 = boto3.client('ec2')
+    rds = boto3.client('rds')
+    elb = boto3.client('elb')
+    cloudwatch = boto3.client('cloudwatch')
+
+    actions = {}
+
+    # Find and clean up resources
+    unattached_volumes = find_unattached_volumes(ec2)
+    delete_unattached_volumes(ec2, unattached_volumes)
+    actions['Deleted Volumes'] = unattached_volumes
+
+    idle_ips = find_idle_elastic_ips(ec2)
+    release_idle_elastic_ips(ec2, idle_ips)
+    actions['Released Elastic IPs'] = idle_ips
+
+    underutilized_instances = find_underutilized_instances(ec2, cloudwatch)
+    stop_underutilized_instances(ec2, underutilized_instances)
+    actions['Stopped Instances'] = underutilized_instances
+
+    unused_rds_instances = find_unused_rds_instances(rds)
+    delete_unused_rds_instances(rds, unused_rds_instances)
+    actions['Deleted RDS Instances'] = unused_rds_instances
+
+    orphaned_lbs = find_orphaned_load_balancers(elb)
+    delete_orphaned_load_balancers(elb, orphaned_lbs)
+    actions['Deleted Load Balancers'] = orphaned_lbs
+
+    # Generate report
+    generate_report(actions)
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+### **Step 7: Testing and Deployment**
+1. **Test the Script**: Run the script in a non-production environment to verify functionality.
+2. **Schedule Execution**: Use AWS Lambda or a cron job on a server to run the script periodically.
+3. **Secure Execution**: Ensure that the script runs in a secure environment with minimal permissions and logging enabled.
+
+---
+
+This project helps automate cost savings by identifying and cleaning unused AWS resources, providing clear insights and actionable results.
